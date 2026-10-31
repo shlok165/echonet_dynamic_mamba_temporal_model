@@ -1,0 +1,24 @@
+# Whitelist: only the code, the result PDFs and the command guides are published.
+# Never published: the EchoNet-Dynamic data (Stanford research use agreement: no redistribution), anything
+# derived from it per video (labels, cached features, predictions, checkpoints), PanEcho weights, third-party
+# papers.
+/*
+!/.gitignore
+!/README.md
+!/architecture/
+!/baseline/
+!/commands/
+!/work/
+
+/work/cache/
+/work/results/
+/work/runs/
+__pycache__/
+*.pyc
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+*.csv
+*.avi
