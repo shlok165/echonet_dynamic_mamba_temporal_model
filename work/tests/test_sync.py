@@ -117,7 +117,7 @@ class TestBlock(unittest.TestCase):
     def test_shapes_and_grads_all_clocks(self):
         torch.manual_seed(0)
         f = torch.randn(3, 20, 512)
-        for clock in ("hr", "none", "fixed", "learned", "tempered"):
+        for clock in ("hr", "none", "fixed", "learned", "tempered", "mix"):
             m = make_temporal("sync", 512, 64, 2, clock=clock, vol_readout=True, aux_weight=1.0)
             z = m(f)
             self.assertEqual(tuple(z.shape), (3, 20, 64))
@@ -240,3 +240,15 @@ class TestHarmonicReadout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMixClock(unittest.TestCase):
+    def test_pairs_split_between_fixed_and_clip_clock(self):
+        f = TestClock()._clips([12.0, 20.0, 30.0], 48, C=512)
+        m = make_temporal("sync", 512, 64, 2, clock="mix")
+        with torch.no_grad():
+            m(f)
+        om = m.last_omega
+        self.assertEqual(tuple(om.shape), (3, 4))
+        torch.testing.assert_close(om[:, 0], torch.full((3,), 2 * math.pi / 24.0))
+        torch.testing.assert_close(om[:, 3], cardiac_clock(f)[0])

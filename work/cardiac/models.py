@@ -185,7 +185,8 @@ class RangeReadout(nn.Module):
         nn.init.zeros_(self.inject.bias)
         self.trim = trim
 
-    def forward(self, z):
+    def stats(self, z):
+        """[soft range, soft midrange] of the k channels over the clip: (B, 2k), float32."""
         with torch.autocast(device_type=z.device.type, enabled=False):
             c = self.proj(z.float())
             T = c.shape[1]
@@ -195,7 +196,11 @@ class RangeReadout(nn.Module):
             n = math.log(c.shape[1])
             smax = tau * (torch.logsumexp(c / tau, 1) - n)
             smin = -tau * (torch.logsumexp(-c / tau, 1) - n)
-            g = self.inject(torch.cat((smax - smin, 0.5 * (smax + smin)), -1))
+            return torch.cat((smax - smin, 0.5 * (smax + smin)), -1)
+
+    def forward(self, z):
+        with torch.autocast(device_type=z.device.type, enabled=False):
+            g = self.inject(self.stats(z))
         return z + g[:, None, :].to(z.dtype)
 
 
@@ -223,6 +228,12 @@ class HarmonicReadout(nn.Module):
 
     def forward(self, z, omega):
         with torch.autocast(device_type=z.device.type, enabled=False):
+            g = self.inject(self.amplitudes(z, omega))
+        return z + g[:, None, :].to(z.dtype)
+
+    def amplitudes(self, z, omega):
+        """Least-squares oscillation amplitudes of the k channels at harmonics of omega: (B, H * k), float32."""
+        with torch.autocast(device_type=z.device.type, enabled=False):
             c = self.proj(z.to(self.proj.weight.dtype))                                 # (B, T, k)
             B, T, _ = c.shape
             t = torch.arange(T, device=c.device, dtype=c.dtype) - (T - 1) / 2
@@ -234,8 +245,7 @@ class HarmonicReadout(nn.Module):
             nh = self.harm.numel()
             amp = (coef[:, 1:1 + nh].square() + coef[:, 1 + nh:].square() + 1e-8).sqrt()  # (B, H, k)
             self.last_amp = amp.detach()
-            g = self.inject(amp.flatten(1))
-        return z + g[:, None, :].to(z.dtype)
+            return amp.flatten(1)
 
 
 def clip_omega(f, kind="hr", prior_period=22.5, min_T=0):
@@ -369,23 +379,73 @@ class EFModel(nn.Module):
         return {"ef": self.head(pooled).squeeze(-1), "Z": z, "F": f}
 
 
+class GridAdapter(nn.Module):
+    """Spatial grid features (B, T, G, d_in) -> (B, T, G * d_tok): a shared Linear per grid position, plus a
+    learned embedding of the position, GELU, then the positions concatenated (keeps where in the image each
+    feature came from, which a global average pool discards)."""
+
+    def __init__(self, d_in, n_tokens, d_tok=96, drop=0.0):
+        super().__init__()
+        self.proj = nn.Linear(d_in, d_tok)
+        self.pos = nn.Parameter(torch.randn(n_tokens, d_tok) * 0.02)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, f):
+        return self.drop(F.gelu(self.proj(f) + self.pos)).flatten(2)
+
+
+class PhasePool(nn.Module):
+    """Read-out at the cardiac frequency: least-squares amplitudes of k learned channels at w and 2w
+    (HarmonicReadout) and their soft temporal range/midrange (RangeReadout), (B, 4k), appended to the mean
+    pool so the head sees the oscillation EF is made of, not only its average. w = the block's own clock
+    (sync: last_omega; for a per-pair clock, its last pair = the clip's clock) or, for blocks without one,
+    the label-free clock of the input features."""
+
+    def __init__(self, d_model, k=16):
+        super().__init__()
+        self.harm = HarmonicReadout(d_model, k)
+        self.range = RangeReadout(d_model, k, trim=2)
+        del self.harm.inject, self.range.inject            # only their statistics are used
+        self.out_dim = 4 * k
+
+    def forward(self, z, f, temporal):
+        w = getattr(temporal, "last_omega", None)
+        if w is None:
+            w = clip_omega(f, "hr")
+        elif w.dim() == 2:
+            w = w[:, -1]
+        return torch.cat((self.harm.amplitudes(z, w), self.range.stats(z)), -1)
+
+
 class FeatModel(nn.Module):
     """Frozen-encoder variant: the same temporal block, mean pool and head on cached per-frame features
-    (scripts/cache_features.py); returns the same dict as EFModel (F = the cached features)."""
+    (scripts/cache_features.py); returns the same dict as EFModel (F = the cached features).
+    temporal_kw grid_tokens=G*G (grid_dim=96): input is a spatial grid cache (B, T, G*G, d_in), read through a
+    GridAdapter before the temporal block."""
 
     def __init__(self, temporal: str, d_in: int = 768, d_model=256, n_layers=2, temporal_kw=None):
         super().__init__()
-        self.temporal = make_temporal(temporal, d_in, d_model, n_layers, **(temporal_kw or {}))
-        self.head = nn.Sequential(nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1))
+        kw = dict(temporal_kw or {})
+        g, gd, gp = kw.pop("grid_tokens", 0), kw.pop("grid_dim", 96), kw.pop("grid_drop", 0.0)
+        pool, pool_k = kw.pop("pool", "mean"), kw.pop("pool_k", 16)
+        self.grid = GridAdapter(d_in, g, gd, gp) if g else None
+        self.temporal = make_temporal(temporal, g * gd if g else d_in, d_model, n_layers, **kw)
+        self.phase = PhasePool(d_model, pool_k) if pool == "phase" else None
+        d_head = d_model + (self.phase.out_dim if self.phase is not None else 0)
+        self.head = nn.Sequential(nn.Linear(d_head, d_model), nn.GELU(), nn.Linear(d_model, 1))
 
     def forward(self, video, valid=None):
         f = video.float()
+        if self.grid is not None:
+            f = self.grid(f)
         z = self.temporal(f)
         if valid is None:
             pooled = z.mean(1)
         else:
             w = valid.to(z.dtype).unsqueeze(-1)
             pooled = (z * w).sum(1) / w.sum(1).clamp_min(1)
+        if self.phase is not None:
+            pooled = torch.cat((pooled, self.phase(z, f, self.temporal).to(pooled.dtype)), -1)
         return {"ef": self.head(pooled).squeeze(-1), "Z": z, "F": f}
 
 

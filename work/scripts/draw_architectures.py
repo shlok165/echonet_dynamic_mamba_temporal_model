@@ -378,6 +378,129 @@ def fig_end_to_end(out):
     save(fig, out, "6_end_to_end")
 
 
+# ----------------------------------------------------------------------------- final model, full detail
+
+def fig_encoder_detail(out):
+    W, H = 36, 17
+    fig, ax = canvas(W, H)
+    header(ax, W, H, "Frame encoder of the final model: PanEcho ConvNeXt-Tiny (frozen, 27,820,128 parameters)",
+           ("frozen", "op", "data"))
+    pre = row(ax, 13.6, [
+        ("video frames\n112 × 112 RGB", "data", {"fs": 8.3}),
+        ("resize 256 × 256\n(cv2 INTER_AREA)", "op", {"fs": 8.3}),
+        ("centre crop\n224 × 224", "op", {"fs": 8.3}),
+        ("3-frame stack: channel j\n= frame t−1+j (clamped\nat the video ends)", "op", {"fs": 8.3}),
+        ("÷ 255, ImageNet mean/std\nnormalisation", "op", {"fs": 8.3}),
+        ("x_t : (3, 224, 224)\none image per frame", "data", {"fs": 8.3}),
+    ], x0=0.6, gap=1.3, minh=2.2)
+    for a, b in zip(pre, pre[1:]):
+        arrow(ax, a.r, b.l)
+    st = row(ax, 9.0, [
+        ("stem\nConv 4×4, stride 4\n3 → 96 + LayerNorm\n4,896", "frozen", {"fs": 7.8}),
+        ("stage 1\n3 ConvNeXt blocks\n96 ch, 56 × 56\n237,888", "frozen", {"fs": 7.8}),
+        ("down\nLN + Conv 2×2 s2\n96 → 192\n74,112", "frozen", {"fs": 7.8}),
+        ("stage 2\n3 blocks\n192 ch, 28 × 28\n918,144", "frozen", {"fs": 7.8}),
+        ("down\n192 → 384\n295,680", "frozen", {"fs": 7.8}),
+        ("stage 3\n9 blocks\n384 ch, 14 × 14\n10,817,280", "frozen", {"fs": 7.8}),
+        ("down\n384 → 768\n1,181,184", "frozen", {"fs": 7.8}),
+        ("stage 4\n3 blocks\n768 ch, 7 × 7\n14,289,408", "frozen", {"fs": 7.8}),
+        ("global avg pool\n+ LayerNorm\n1,536", "frozen", {"fs": 7.8}),
+        ("f_t : 768", "data", {"fs": 8.3, "bold": True}),
+    ], x0=0.6, gap=0.75, minh=2.6)
+    for a, b in zip(st, st[1:]):
+        arrow(ax, a.r, b.l)
+    ax.text(0.6, 11.3, "x_t →", fontsize=9, color=MUTED)
+    blk = row(ax, 4.4, [
+        ("input\n(C, h, w)", "data", {"fs": 8.3}),
+        ("depthwise Conv 7×7\n(padding 3)", "frozen", {"fs": 8.3}),
+        ("LayerNorm\n(channels)", "frozen", {"fs": 8.3}),
+        ("Linear C → 4C", "frozen", {"fs": 8.3}),
+        ("GELU", "op", {"fs": 8.3}),
+        ("Linear 4C → C", "frozen", {"fs": 8.3}),
+        ("layer scale γ\n(per channel)", "frozen", {"fs": 8.3}),
+        ("+ input\n(residual)", "op", {"fs": 8.3}),
+    ], x0=0.6, gap=1.1, minh=1.9)
+    for a, b in zip(blk, blk[1:]):
+        arrow(ax, a.r, b.l)
+    ax.text(0.6, 6.3, "one ConvNeXt block (CNBlock), used 18 times:", fontsize=10, fontweight="bold")
+    ax.text(0.6, 1.6, "Weights: PanEcho release (Holste et al., JAMA 2025; trained on >1M Yale echocardiography videos; "
+            "EchoNet-Dynamic not used), loaded as tensors only, CC BY-NC-SA 4.0. Never trained here: run once in bf16 "
+            "over every frame of every video,\nfeatures stored as float16 (10,030 videos, 1.77M frames). "
+            "Stochastic depth is inactive (eval mode).", fontsize=8.3, color=MUTED, va="top", linespacing=1.5)
+    save(fig, out, "F2_encoder_detail")
+
+
+def fig_final_details(out):
+    W, H = 36, 22
+    fig, ax = canvas(W, H)
+    header(ax, W, H, "Final model: every trainable tensor, hyperparameters and training recipe")
+    rows_ = [
+        ("input projection", "Linear 768 → 256 (weight + bias)", "196,864", "1×"),
+        ("layer ℓ = 1, 2: pre-norm", "RMSNorm(256)", "256", "2×"),
+        ("  mixer in_proj", "Linear 256 → 1024 (no bias): x (512) and gate z (512)", "262,144", "2×"),
+        ("  mixer conv", "depthwise Conv1d over time, k = 3, 512 channels (+ bias), replicate padding", "2,048", "2×"),
+        ("  mixer x_proj", "Linear 512 → 96 (no bias): B_fwd, C_fwd, B_bwd, C_bwd (16 each) + Δt (32)", "49,152", "2×"),
+        ("  dt_bias", "32 (16 heads × 2 directions); Δt = softplus(x_proj + dt_bias)", "32", "2×"),
+        ("  A_log", "32; A = −exp(A_log), one decay per head and direction", "32", "2×"),
+        ("  D", "16; skip term D · x", "16", "2×"),
+        ("  output norm", "RMSNorm(512) after y ⊙ SiLU(z)", "512", "2×"),
+        ("  mixer out_proj", "Linear 512 → 256 (no bias); + residual", "131,072", "2×"),
+        ("final norm", "RMSNorm(256)", "256", "1×"),
+        ("clock", "log P: one learned period, ω = 2π / P (init 24 frames)", "1", "1×"),
+        ("head", "Linear 256 → 256, GELU, Linear 256 → 1", "66,049", "1×"),
+        ("total trainable", "temporal block 1,087,649 + head 66,049", "1,153,698", ""),
+    ]
+    ax.text(0.6, 20.0, "Trainable parameters (counted from the model)", fontsize=11, fontweight="bold")
+    y = 19.0
+    for i, (a, b, c, d) in enumerate(rows_):
+        bold = i == len(rows_) - 1
+        if i % 2 == 0:
+            ax.add_patch(plt.Rectangle((0.5, y - 0.36), 21.0, 0.72, fc="#F6F6F4", ec="none", zorder=0))
+        ax.text(0.7, y, a, fontsize=8.6, va="center", fontweight="bold" if bold else "normal")
+        ax.text(5.2, y, b, fontsize=8.6, va="center", color=INK)
+        ax.text(19.6, y, c, fontsize=8.6, va="center", ha="right", fontweight="bold" if bold else "normal")
+        ax.text(20.4, y, d, fontsize=8.6, va="center", color=MUTED)
+        y -= 0.78
+    hp = ["Hyperparameters",
+          "d_model 256, expand 2 → d_inner 512",
+          "16 heads × head dim 32 per direction",
+          "state size N = 16 per direction",
+          "rotating state pairs R = 4 of 8,",
+          "   harmonics k = (1, 2, 1, 2)",
+          "Δt init log-uniform [1e-3, 1e-1]",
+          "A init uniform [1, 16]",
+          "learned period P after training:",
+          "   26.2 / 24.9 / 25.5 sampled frames",
+          "   (seeds 0 / 1 / 2) ≈ 1 s ≈ 1 beat",
+          "",
+          "Training",
+          "frozen features, T = 32 frames, stride 2,",
+          "   random clip start, loop padding",
+          "MSE on standardised EF",
+          "AdamW, lr 1e-3, weight decay 1e-4",
+          "cosine schedule, 5% warm-up",
+          "batch 16, 40 epochs, bf16 autocast",
+          "weight EMA 0.999 (used for validation,",
+          "   selection and evaluation)",
+          "best epoch by single-clip VAL MAE",
+          "",
+          "Evaluation",
+          "EF = mean over 4 evenly spaced clips",
+          "   per video; mean over real frames"]
+    ax.text(23.0, 20.0, "\n".join(hp), fontsize=8.8, va="top", linespacing=1.55, color=INK)
+    ax.text(0.6, 7.4, "Forward pass for one clip", fontsize=11, fontweight="bold")
+    steps = ["f (T, 768) → Linear → x (T, 256)",
+             "ω = 2π / P;   cos, sin of k_j · ω · t for t = 0 … T−1, j = 1 … 4   (computed once, shared by both layers)",
+             "for each layer:  u = RMSNorm(x);  [x′, z] = in_proj(u);  x′ = SiLU(Conv1d(x′));  B, C, Δt = x_proj(x′)",
+             "   rotate pairs 1–4 of B and C by angle k_j ω t;  y = forward SSM (s ≤ t) + backward SSM (s > t) + D·x′, "
+             "as one T × T matrix per head",
+             "   x = x + out_proj(RMSNorm(y ⊙ SiLU(z)))",
+             "z = RMSNorm(x)  →  mean over real (non-padding) frames  →  head  →  standardised EF  →  EF = 12.3·ŷ + 55.75 "
+             "(TRAIN SD / mean)"]
+    ax.text(0.6, 6.6, "\n".join(steps), fontsize=8.8, va="top", linespacing=1.7, color=INK)
+    save(fig, out, "F4_final_details")
+
+
 # ----------------------------------------------------------------------------- baselines
 
 def fig_baseline_blocks(out):

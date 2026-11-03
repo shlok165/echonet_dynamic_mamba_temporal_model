@@ -134,3 +134,33 @@ class TestPanEchoEFModel(unittest.TestCase):
         out["ef"].sum().backward()
         self.assertIsNotNone(next(self.m.tuned.parameters()).grad)
         self.m.zero_grad(set_to_none=True)
+
+
+class TestGridFeatures(unittest.TestCase):
+    def test_grid_adapter_shapes_and_position_sensitivity(self):
+        from cardiac.models import FeatModel
+        torch.manual_seed(0)
+        for kind, nl, kw in (("sync", 2, {"clock": "fixed"}), ("bigru", 3, {})):
+            m = FeatModel(kind, 768, 64, nl, {**kw, "grid_tokens": 9, "grid_dim": 16}).eval()
+            x = torch.randn(2, 12, 9, 768)
+            out = m(x)
+            self.assertEqual(tuple(out["ef"].shape), (2,))
+            self.assertEqual(tuple(out["F"].shape), (2, 12, 9 * 16))
+            # swapping two grid positions changes the output: the model knows where features came from
+            y = x.clone()
+            y[:, :, [0, 8]] = x[:, :, [8, 0]]
+            self.assertFalse(torch.allclose(m(y)["ef"], out["ef"]))
+
+
+class TestPhasePool(unittest.TestCase):
+    def test_phase_pool_all_clocks_and_bigru(self):
+        from cardiac.models import FeatModel
+        torch.manual_seed(0)
+        for kind, nl, kw in (("sync", 2, {"clock": "fixed"}), ("sync", 2, {"clock": "mix"}),
+                             ("sync", 2, {"clock": "hr"}), ("bigru", 3, {})):
+            m = FeatModel(kind, 768, 64, nl, {**kw, "pool": "phase", "pool_k": 8})
+            out = m(torch.randn(2, 32, 768), torch.ones(2, 32, dtype=torch.bool))
+            self.assertEqual(tuple(out["ef"].shape), (2,))
+            out["ef"].sum().backward()
+            self.assertIsNotNone(m.phase.harm.proj.weight.grad, kind)
+            self.assertIsNotNone(m.phase.range.proj.weight.grad, kind)

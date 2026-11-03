@@ -56,8 +56,12 @@ def main():
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--chunk", type=int, default=128)
     ap.add_argument("--stack", type=int, default=1, choices=[1, 3])
+    ap.add_argument("--grid", type=int, default=0,
+                    help="G > 0: store the last-stage map average-pooled to G x G (+ the final LayerNorm per position), "
+                         "(n_frames, G*G, 768), in feats_<encoder>[_s3]_g<G> under config.CACHE2")
     a = ap.parse_args()
-    out_dir = config.CACHE / (f"feats_{a.encoder}" + ("_s3" if a.stack == 3 else ""))
+    name = f"feats_{a.encoder}" + ("_s3" if a.stack == 3 else "") + (f"_g{a.grid}" if a.grid else "")
+    out_dir = (config.CACHE2 if a.grid else config.CACHE) / name
     out_dir.mkdir(parents=True, exist_ok=True)
     fl = pd.read_csv(config.FILELIST)
     todo = [n for n in fl.FileName if not (out_dir / f"{n}.npy").exists()]
@@ -79,7 +83,12 @@ def main():
         for i in range(0, x.shape[0], a.chunk):
             xi = ((x[i:i + a.chunk].float() / 255.0 - mean) / std).contiguous(memory_format=torch.channels_last)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                feats.append(enc(xi).float())
+                if a.grid:
+                    m = torch.nn.functional.adaptive_avg_pool2d(enc.features(xi), a.grid)   # (n, 768, G, G)
+                    m = enc.classifier[0](m)                                                # LayerNorm2d
+                    feats.append(m.flatten(2).transpose(1, 2).float())                      # (n, G*G, 768)
+                else:
+                    feats.append(enc(xi).float())
         f = torch.cat(feats).cpu().numpy().astype(np.float16)
         tmp = out_dir / f"{name}.tmp.npy"
         np.save(tmp, f)

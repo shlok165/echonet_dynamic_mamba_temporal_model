@@ -23,7 +23,7 @@ function Step($name, [scriptblock]$cmd) {
     & $cmd 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 "$logs\$name.log"
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] END $name exit=$LASTEXITCODE" | Tee-Object -Append "$logs\$log.log"
 }
-$prefix = @{ 'panecho' = 'pe'; 'panecho_s3' = 'pe3' }[$features]
+$prefix = @{ 'panecho' = 'pe'; 'panecho_s3' = 'pe3'; 'panecho_s3_g3' = 'pe3g' }[$features]
 $vol = 'vol_readout=True,aux_weight=1.0,conv_pad=replicate,vol_trim=2'
 # name -> (temporal, n_layers, temporal-kw); all ~1.07-1.12M temporal parameters except identity
 $configs = [ordered]@{
@@ -37,6 +37,13 @@ $configs = [ordered]@{
     'sync_novol_fixed'  = @('sync', 2, 'clock=fixed,conv_pad=replicate');
     'sync_novol_learned' = @('sync', 2, 'clock=learned,conv_pad=replicate');
     'sync_novol_tempered' = @('sync', 2, 'clock=tempered,conv_pad=replicate,min_clock_T=24');
+    'sync_novol_fixed_grid' = @('sync', 2, 'clock=fixed,conv_pad=replicate,grid_tokens=9');
+    'bigru_grid'        = @('bigru', 3, 'grid_tokens=9');
+    'sync_novol_fixed_gridreg' = @('sync', 2, 'clock=fixed,conv_pad=replicate,grid_tokens=9,grid_dim=32,grid_drop=0.3');
+    'sync_novol_mix'    = @('sync', 2, 'clock=mix,conv_pad=replicate');
+    'sync_novol_fixed_phase' = @('sync', 2, 'clock=fixed,conv_pad=replicate,pool=phase');
+    'sync_novol_mix_phase' = @('sync', 2, 'clock=mix,conv_pad=replicate,pool=phase');
+    'bigru_phase'       = @('bigru', 3, 'pool=phase');
     'sync_noclock'      = @('sync', 2, "clock=none,$vol");
     'sync_fixed'        = @('sync', 2, "clock=fixed,$vol");
     'sync_learned'      = @('sync', 2, "clock=learned,$vol");

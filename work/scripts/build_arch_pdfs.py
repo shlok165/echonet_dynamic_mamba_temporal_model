@@ -28,11 +28,15 @@ def grab(fig, *_):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[2] / "architecture"))
+    ap.add_argument("--final-only", action="store_true", help="only the detailed final-model PDF")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     D.save = C.save = grab                    # collect the figures instead of writing image files
     splits = [s for s in ("val", "test") if C.have(s, [C.REF[1]] + [k for _, k in C.MAIN])]
+    if a.final_only:
+        build_final(out, splits)
+        return
     rows = []
     docs = [
         ("1_final_model", D.fig_pipeline, [lambda s: C.fig_headline(s, rows)], True),
@@ -56,6 +60,23 @@ def main():
         print(f"wrote {path} ({len(figs)} pages: architecture + {', '.join(splits if per_split else ['val'])})")
     build_all(out, splits)
     build_baselines(out.parent / "baseline", splits)
+
+
+def build_final(out, splits):
+    """architecture/1_final_model_vs_bigru.pdf in full detail: pipeline, encoder internals, sync block, every
+    trainable tensor + recipe, then the comparison with BiGRU (validation, test)."""
+    figs.clear()
+    for f in (D.fig_pipeline, D.fig_encoder_detail, D.fig_sync_block, D.fig_final_details):
+        f(None)
+    for s in splits:
+        C.fig_headline(s, [])
+        C.fig_all_metrics(s)
+    path = out / "1_final_model_vs_bigru.pdf"
+    with PdfPages(path) as pdf:
+        for fig in figs:
+            pdf.savefig(fig, bbox_inches="tight", pad_inches=0.15, facecolor="white")
+            plt.close(fig)
+    print(f"wrote {path} ({len(figs)} pages)")
 
 
 def build_baselines(out, splits):

@@ -43,7 +43,7 @@ def load_model(run, dev, override=None):
     a = ck["args"]
     kw = {**json.loads(a["temporal_kw"]), **(override or {})}
     if a.get("features"):
-        d_in = ck["model"]["temporal.inp.weight"].shape[1]
+        d_in = ck["model"].get("grid.proj.weight", ck["model"]["temporal.inp.weight"]).shape[1]
         model = FeatModel(a["temporal"], d_in, d_model=a["d_model"], n_layers=a["n_layers"], temporal_kw=kw)
     elif a.get("panecho_tune"):
         model = PanEchoEFModel(a["temporal"], d_model=a["d_model"], n_layers=a["n_layers"], temporal_kw=kw,
@@ -63,7 +63,7 @@ def make_clips(a, split, **kw):
     """The run's dataset: decoded frames, its cached frozen features (args "features"), or PanEcho's
     3-frame-stack images (args "panecho_tune")."""
     if a.get("features"):
-        return FeatClips(split, config.CACHE / f"feats_{a['features']}", **kw)
+        return FeatClips(split, config.feat_dir(a["features"]), **kw)
     if a.get("panecho_tune"):
         return StackClips(split, **kw)
     return EchoClips(split, **kw)
@@ -220,6 +220,9 @@ def main():
     ap.add_argument("--split", default="TEST", choices=["TEST", "VAL"], help="VAL = development evaluation")
     ap.add_argument("--temporal-override", default="", help="inference-only temporal options, e.g. min_clock_T=24")
     ap.add_argument("--tag", default="", help="suffix for the output files")
+    ap.add_argument("--clip-mode", default="even", choices=["even", "phase"],
+                    help="phase: clips one whole-video cardiac period apart, at the same phase (features only)")
+    ap.add_argument("--warp", type=float, default=1.0, help="time-warp factor of the clips (features only)")
     args = ap.parse_args()
     from train import parse_kw
     override = parse_kw(args.temporal_override) if args.temporal_override else None
@@ -237,7 +240,8 @@ def main():
         res = json.loads(out_json.read_text())
     for T in ([] if args.probe_only else args.Ts):
         t0 = time.perf_counter()
-        r = run_pass(model, a, dev, args.split, T, "multi", args.n_clips, keep_Z=True, workers=args.workers)
+        extra = {"clip_mode": args.clip_mode, "warp": args.warp} if a.get("features") else {}
+        r = run_pass(model, a, dev, args.split, T, "multi", args.n_clips, keep_Z=True, workers=args.workers, **extra)
         ef, ym, pm = ef_block(r)
         n_videos = len(np.unique(r["vid"]))
         first_frame = r["frame_idx"][:, 0]

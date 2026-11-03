@@ -188,7 +188,8 @@ class SyncMixer(nn.Module):
         if self.R == 0 or self.clock in ("none", "learned") or omega is None:
             return None
         t = torch.arange(T, device=device, dtype=torch.float32)
-        ang = omega.float()[:, None, None] * t[None, :, None] * self.harm[None, None, :]
+        om = omega.float()[:, None, :] if omega.dim() == 2 else omega.float()[:, None, None]   # per pair or shared
+        ang = om * t[None, :, None] * self.harm[None, None, :]
         return torch.cos(ang), torch.sin(ang)
 
     def forward(self, u, omega=None, rot=None):
@@ -262,13 +263,13 @@ class SyncTemporal(nn.Module):
         self.clock_kw = dict(min_period=min_period, max_period=max_period)
         self.min_clock_T, self.prior_period = min_clock_T, prior_period
         self.inp = nn.Linear(d_in, d_model)
-        mixer_clock = "hr" if clock in ("hr", "fixed", "tempered") else clock
+        mixer_clock = "hr" if clock in ("hr", "fixed", "tempered", "mix") else clock
         self.layers = nn.ModuleList([SyncLayer(d_model, clock=mixer_clock, **kw) for _ in range(n_layers)])
         self.norm = RMSNorm(d_model)
         self.range = RangeReadout(d_model, range_k, trim=range_trim) if range_k else None
         self.harm = HarmonicReadout(d_model, harm_k) if harm_k else None
         self.harm_clock = harm_clock
-        self.log_period = nn.Parameter(torch.tensor(math.log(24.0))) if clock in ("fixed", "tempered") else None
+        self.log_period = nn.Parameter(torch.tensor(math.log(24.0))) if clock in ("fixed", "tempered", "mix") else None
         self.temper = nn.Parameter(torch.tensor(0.0)) if clock == "tempered" else None   # gamma = sigmoid
         self.vol_readout, self.aux_weight = vol_readout, aux_weight
         if vol_readout:
@@ -298,6 +299,15 @@ class SyncTemporal(nn.Module):
             omega = torch.full((f.shape[0],), TWO_PI / self.prior_period, device=f.device)
         elif self.clock == "fixed":
             omega = (TWO_PI / self.log_period.exp()).expand(f.shape[0])
+        elif self.clock == "mix":
+            # population clock on the first half of the rotating pairs, the clip's own clock on the rest
+            w_fix = (TWO_PI / self.log_period.exp()).expand(f.shape[0])
+            if f.shape[1] >= self.min_clock_T:
+                w_hr = cardiac_clock(f.detach(), **self.clock_kw)[0]
+            else:
+                w_hr = torch.full((f.shape[0],), TWO_PI / self.prior_period, device=f.device)
+            R = self.layers[0].mixer.R
+            omega = torch.cat((w_fix[:, None].expand(-1, R // 2), w_hr[:, None].expand(-1, R - R // 2)), 1)
         elif self.clock == "tempered":
             ratio = torch.ones(f.shape[0], device=f.device)          # short clip: no beat to measure
             if f.shape[1] >= self.min_clock_T:

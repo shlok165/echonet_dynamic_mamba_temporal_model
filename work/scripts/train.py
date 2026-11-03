@@ -176,7 +176,7 @@ def main(argv=None):
 
     common = dict(T=args.T, stride=args.stride, pad=args.pad)
     if args.features:
-        feat_dir = config.CACHE / f"feats_{args.features}"
+        feat_dir = config.feat_dir(args.features)
         Clips = lambda split, **kw: FeatClips(split, feat_dir, **kw)  # noqa: E731
     elif args.panecho_tune:
         Clips = StackClips

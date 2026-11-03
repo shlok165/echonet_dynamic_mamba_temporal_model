@@ -270,11 +270,63 @@ class FeatClips(EchoClips):
     features; with augment=True and aug="strong" only the time reversal (p=0.5) is used.
     """
 
-    def __init__(self, split: str, feat_dir: str | Path, **kw):
+    def __init__(self, split: str, feat_dir: str | Path, clip_mode: str = "even", warp: float = 1.0,
+                 hr_csv: str | Path | None = None, **kw):
+        """clip_mode (mode="multi" only): "even" = evenly spaced starts; "phase" = starts one whole-video
+        cardiac period apart, beginning at the same phase of the cycle (period from hr_csv =
+        results/hr_reference.csv, phase from the first principal component of the video's features; both
+        label-free), n_clips of them spread over the video. warp: time-warp factor (evaluation only): frames
+        are taken every stride * warp original frames and features linearly interpolated, so warp > 1 plays
+        the heart faster, warp < 1 slower."""
         super().__init__(split, **kw)
         idx = pd.read_csv(Path(feat_dir) / "index.csv").set_index("FileName")
         self.feat_dir = str(feat_dir)
         self.n_frames = idx.loc[self.names, "n_decoded"].to_numpy(np.int64)
+        assert clip_mode in ("even", "phase")
+        self.clip_mode, self.warp = clip_mode, float(warp)
+        self.phase_starts = None
+        if clip_mode == "phase" and self.mode == "multi":
+            hr = pd.read_csv(hr_csv or (config.RESULTS / "hr_reference.csv")).set_index("FileName")["period_frames"]
+            self.phase_starts = [self._phase_starts(v, float(hr.get(n, np.nan))) for v, n in enumerate(self.names)]
+
+    def _phase_starts(self, v, period):
+        n = int(self.n_frames[v])
+        even = clip_starts(n, self.T, self.stride, self.n_clips, self.pad)
+        span = (self.T - 1) * self.stride + 1
+        if not np.isfinite(period) or period < 2 or span > n:
+            return even
+        x = np.load(f"{self.feat_dir}/{self.names[v]}.npy").astype(np.float32)
+        x = x.reshape(len(x), -1) - x.reshape(len(x), -1).mean(0)
+        pc = x @ np.linalg.svd(x, full_matrices=False)[2][0]                     # first principal component
+        t = np.arange(n)
+        w = 2 * np.pi / period
+        phi = np.arctan2((pc * np.sin(w * t)).sum(), (pc * np.cos(w * t)).sum())   # pc ~ cos(w t - phi)
+        s0 = (phi / w) % period
+        cand = [int(round(s0 + j * period)) for j in range(int(n / period) + 2)]
+        cand = [c for c in cand if 0 <= c <= n - span]
+        if not cand:
+            return even
+        return [cand[int(round(q))] for q in np.linspace(0, len(cand) - 1, self.n_clips)]
+
+    def _start(self, v, k, rng):
+        if self.phase_starts is not None:
+            return self.phase_starts[v][k]
+        return super()._start(v, k, rng)
+
+    def _warped(self, v, start):
+        """Fractional frame positions every stride * warp frames from start; linear interpolation."""
+        n = int(self.n_frames[v])
+        step = self.stride * self.warp
+        start = min(start, max(0.0, n - 1 - (self.T - 1) * step))
+        pos = start + np.arange(self.T) * step
+        valid = pos <= n - 1
+        pos = pos % n if self.pad == "loop" else np.minimum(pos, n - 1)
+        i0 = np.floor(pos).astype(np.int64)
+        i1 = np.minimum(i0 + 1, n - 1)
+        f = np.load(f"{self.feat_dir}/{self.names[v]}.npy", mmap_mode="r")
+        a = (pos - i0).astype(np.float32).reshape(-1, *([1] * (f.ndim - 1)))     # broadcast over feature dims
+        feats = (1 - a) * f[i0].astype(np.float32) + a * f[i1].astype(np.float32)
+        return feats.astype(np.float16), np.round(pos).astype(np.int64) % n, valid
 
     def __getitem__(self, i: int):
         epoch, i = divmod(int(i), len(self))
@@ -282,14 +334,18 @@ class FeatClips(EchoClips):
         rng = (np.random.default_rng(_stable_seed("item", self.sample_seed, epoch, i))
                if self.mode == "random" else None)
         start = self._start(v, k, rng)
-        idx, valid, eff_stride = clip_indices(int(self.n_frames[v]), self.T, self.stride, start, self.pad)
         order = np.arange(self.T)
         if self.frame_order == "shuffle":
             order = np.random.default_rng(_stable_seed(self.order_seed, self.names[v], k)).permutation(self.T)
         elif self.frame_order == "reverse":
             order = order[::-1].copy()
-        idx, valid = idx[order], valid[order]
-        feats = np.load(f"{self.feat_dir}/{self.names[v]}.npy", mmap_mode="r")[idx]
+        if self.warp != 1.0:
+            feats, idx, valid = self._warped(v, start)
+            feats, idx, valid, eff_stride = feats[order], idx[order], valid[order], self.stride
+        else:
+            idx, valid, eff_stride = clip_indices(int(self.n_frames[v]), self.T, self.stride, start, self.pad)
+            idx, valid = idx[order], valid[order]
+            feats = np.load(f"{self.feat_dir}/{self.names[v]}.npy", mmap_mode="r")[idx]
         if self.augment and self.aug == "strong" and rng.random() < 0.5:
             feats, idx, valid = feats[::-1], idx[::-1].copy(), valid[::-1].copy()
         return {
